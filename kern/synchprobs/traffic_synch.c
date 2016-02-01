@@ -21,7 +21,49 @@
 /*
  * replace this with declarations of any synchronization and other variables you need here
  */
-static struct semaphore *intersectionSem;
+#define NUM_OF_DIRECTIONS 4
+
+static struct lock *intersection_lock;
+
+static int num_vehicles[NUM_OF_DIRECTIONS][NUM_OF_DIRECTIONS];
+static struct cv *intersection_cvs[NUM_OF_DIRECTIONS][NUM_OF_DIRECTIONS];
+
+static bool
+is_right_turn(Direction origin, Direction dest) {
+  /*
+   * right turn:      left turn:
+   * north --> west   west  --> north
+   * south --> east   east  --> south
+   * west  --> south  south --> west
+   * east  --> north  north --> east
+   */
+  return ((origin == north && dest == west) ||
+	  (origin == south && dest == east) ||
+	  (origin == west && dest == south) ||
+	  (origin == east && dest == north));
+}
+
+static bool
+legal_to_go(Direction origin, Direction dest) {
+  for (unsigned int i=0; i<NUM_OF_DIRECTIONS; ++i) {
+    for (unsigned int j=0; j<NUM_OF_DIRECTIONS; ++j) {
+      if (num_vehicles[i][j] > 0) {
+	// implict convert enum to unsigned int
+	if ((origin == i && dest == j) ||
+	    (origin == j && dest == i) ||
+	    (dest != j && is_right_turn(origin, dest))) {
+	  // ok to enter together
+	  continue;
+	}
+	else {
+	  return false;
+	}
+      }
+    }
+  }
+
+  return true;
+}
 
 
 /* 
@@ -36,10 +78,22 @@ intersection_sync_init(void)
 {
   /* replace this default implementation with your own implementation */
 
-  intersectionSem = sem_create("intersectionSem",1);
-  if (intersectionSem == NULL) {
+  intersection_lock = lock_create("intersection_lock");
+  if (intersection_lock == NULL) {
     panic("could not create intersection semaphore");
   }
+  for (unsigned int i=0; i<NUM_OF_DIRECTIONS; ++i) {
+    for (unsigned int j=0; j<NUM_OF_DIRECTIONS; ++j) {
+
+      intersection_cvs[i][j] = cv_create("intersection cv");
+      if (intersection_cvs[i][j] == NULL) {
+	panic("could not create condition variable");
+      }
+
+      num_vehicles[i][j] = 0;
+    }
+  }
+
   return;
 }
 
@@ -54,8 +108,16 @@ void
 intersection_sync_cleanup(void)
 {
   /* replace this default implementation with your own implementation */
-  KASSERT(intersectionSem != NULL);
-  sem_destroy(intersectionSem);
+  KASSERT(intersection_lock != NULL);
+  lock_destroy(intersection_lock);
+
+  for (unsigned int i=0; i<NUM_OF_DIRECTIONS; ++i) {
+    for (unsigned int j=0; j<NUM_OF_DIRECTIONS; ++j) {
+
+      cv_destroy(intersection_cvs[i][j]);
+
+    }
+  }
 }
 
 
@@ -76,10 +138,15 @@ void
 intersection_before_entry(Direction origin, Direction destination) 
 {
   /* replace this default implementation with your own implementation */
-  (void)origin;  /* avoid compiler complaint about unused parameter */
-  (void)destination; /* avoid compiler complaint about unused parameter */
-  KASSERT(intersectionSem != NULL);
-  P(intersectionSem);
+  lock_acquire(intersection_lock);
+  
+  while (!legal_to_go(origin, destination)) {
+    cv_wait(intersection_cvs[origin][destination], intersection_lock);
+  }
+
+  ++num_vehicles[origin][destination];
+
+  lock_release(intersection_lock);
 }
 
 
@@ -98,8 +165,20 @@ void
 intersection_after_exit(Direction origin, Direction destination) 
 {
   /* replace this default implementation with your own implementation */
-  (void)origin;  /* avoid compiler complaint about unused parameter */
-  (void)destination; /* avoid compiler complaint about unused parameter */
-  KASSERT(intersectionSem != NULL);
-  V(intersectionSem);
+  lock_acquire(intersection_lock);
+
+  --num_vehicles[origin][destination];
+
+  if (num_vehicles[origin][destination] == 0) {
+    // last vehicle from origin to destination, notify other
+    // potential waiting vehicles.
+    for (unsigned int i=0; i<NUM_OF_DIRECTIONS; ++i) {
+      for (unsigned int j=0; j<NUM_OF_DIRECTIONS; ++j) {
+	cv_broadcast(intersection_cvs[i][j], intersection_lock);
+      }
+    }
+
+  }
+
+  lock_release(intersection_lock);
 }
